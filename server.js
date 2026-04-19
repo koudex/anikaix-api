@@ -723,7 +723,7 @@ app.get('/api/episode-srcs', async (req, res) => {
 // 404 handler
 app.use((req, res) => {
   res.status(404).json(createResponse(false, null, {
-    message: \`Route \${req.method} \${req.path} not found\`,
+    message:`Route ${req.method} ${req.path} not found`,
     code: 'ROUTE_NOT_FOUND',
     status: 404
   }));
