@@ -5,6 +5,7 @@ const animekai = require('./animekai');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const IS_SERVERLESS = process.env.VERCEL || process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME;
 
 app.use(cors());
 app.use(express.json());
@@ -17,43 +18,583 @@ function sendResult(res, result) {
   return res.json({ success: true, ...result });
 }
 
-// ---------------------- ORIGINAL ENDPOINTS ----------------------
-app.get('/', (req, res) => {
-  res.json({
-    success: true,
-    api: 'Anime Kai REST API',
-    version: '2.0.0',
-    author: 'AnimeKai Scraper',
-    endpoints: {
-      '/api/': 'API documentation',
-      '/api/home': 'Get banner, latest updates, and trending',
-      '/api/most-searched': 'Get most-searched anime keywords',
-      '/api/search?keyword=...': 'Search anime',
-      '/api/anime/:slug': 'Get anime details and ani_id',
-      '/api/episodes/:ani_id': 'Get episode list and ep tokens',
-      '/api/servers/:ep_token': 'Get available servers for an episode',
-      '/api/source/:link_id': 'Get direct m3u8 stream and skip times',
-      '/api/trending': 'Get currently trending anime',
-      '/api/popular': 'Get most popular anime this week',
-      '/api/schedule': 'Get weekly airing schedule',
-      '/api/random': 'Get a random anime',
-      '/api/genre': 'Get list of all genres',
-      '/api/az-list': 'Get anime alphabetically',
-      '/api/subbed-anime': 'Get subbed anime list',
-      '/api/dubbed-anime': 'Get dubbed anime list',
-      '/api/ona': 'Get ONA (Original Net Animation) list',
-      '/api/ova': 'Get OVA list',
-      '/api/movie': 'Get anime movies',
-      '/api/specials': 'Get specials',
-      '/api/events': 'Get events',
-      '/api/recently-added': 'Get recently added anime',
-      '/api/filter': 'Filter anime (type, genre, year) - basic',
-      '/api/episode-srcs': 'Get streaming sources (query: id, server, category)',
-      '/docs': 'Interactive API playground',
+// Standardized response format
+const createResponse = (success, data = null, error = null, meta = {}) => {
+  const response = { success, timestamp: new Date().toISOString() };
+  if (success && data !== null) response.data = data;
+  if (!success && error) response.error = { message: error.message || error, code: error.code || 'UNKNOWN_ERROR', status: error.status || 500 };
+  if (Object.keys(meta).length > 0) response.meta = meta;
+  return response;
+};
+
+// ==================== API DOCUMENTATION ====================
+const API_DOCS = {
+  title: "Anime Kai REST API",
+  version: "2.0.0",
+  description: "Comprehensive REST API for anime streaming data - Scrapes anikai.to",
+  baseUrl: "/api",
+  deployment: {
+    vercel: "One-click deploy with vercel.json",
+    netlify: "One-click deploy with netlify.toml",
+    local: "Run with 'npm start' or 'node server.js'"
+  },
+  services: {
+    core: {
+      name: "Core Endpoints",
+      endpoints: [
+        { method: "GET", path: "/", description: "API information and available endpoints", parameters: [], example: "/api/" },
+        { method: "GET", path: "/home", description: "Get banner, latest updates, and trending anime", parameters: [], example: "/api/home" },
+        { method: "GET", path: "/most-searched", description: "Get most-searched anime keywords", parameters: [], example: "/api/most-searched" },
+        { method: "GET", path: "/trending", description: "Get currently trending anime", parameters: [], example: "/api/trending" },
+        { method: "GET", path: "/popular", description: "Get most popular anime this week", parameters: [], example: "/api/popular" },
+        { method: "GET", path: "/schedule", description: "Get weekly airing schedule", parameters: [], example: "/api/schedule" },
+        { method: "GET", path: "/random", description: "Get a random anime", parameters: [], example: "/api/random" },
+        { method: "GET", path: "/genre", description: "Get list of all genres", parameters: [], example: "/api/genre" },
+        { method: "GET", path: "/az-list", description: "Get anime alphabetically", parameters: [], example: "/api/az-list" }
+      ]
     },
-  });
+    search: {
+      name: "Search & Discovery",
+      endpoints: [
+        { method: "GET", path: "/search", description: "Search for anime by keyword", parameters: [{ name: "keyword", type: "string", required: true, description: "Search query" }, { name: "page", type: "number", required: false, default: 1, description: "Page number" }], example: "/api/search?keyword=naruto&page=1" },
+        { method: "GET", path: "/filter", description: "Filter anime by criteria", parameters: [{ name: "type", type: "string", required: false, description: "TV, Movie, OVA, etc." }, { name: "genre", type: "string", required: false, description: "Genre name" }, { name: "year", type: "string", required: false, description: "Release year" }], example: "/api/filter?type=TV&year=2024" },
+        { method: "GET", path: "/subbed-anime", description: "Get subbed anime list", parameters: [{ name: "page", type: "number", required: false, default: 1 }], example: "/api/subbed-anime?page=1" },
+        { method: "GET", path: "/dubbed-anime", description: "Get dubbed anime list", parameters: [{ name: "page", type: "number", required: false, default: 1 }], example: "/api/dubbed-anime?page=1" },
+        { method: "GET", path: "/recently-added", description: "Get recently added anime", parameters: [{ name: "page", type: "number", required: false, default: 1 }], example: "/api/recently-added?page=1" }
+      ]
+    },
+    anime: {
+      name: "Anime Information",
+      endpoints: [
+        { method: "GET", path: "/anime/:slug", description: "Get detailed anime information including ani_id", parameters: [{ name: "slug", type: "string", required: true, description: "Anime slug from search or home" }], example: "/api/anime/naruto" },
+        { method: "GET", path: "/episodes/:ani_id", description: "Get episode list with encrypted tokens", parameters: [{ name: "ani_id", type: "string", required: true, description: "Anime ID from anime details" }], example: "/api/episodes/12345" },
+        { method: "GET", path: "/servers/:ep_token", description: "Get available servers for an episode", parameters: [{ name: "ep_token", type: "string", required: true, description: "Episode token from episodes endpoint" }], example: "/api/servers/encrypted_token_here" },
+        { method: "GET", path: "/source/:link_id", description: "Get direct m3u8 stream URL and skip times", parameters: [{ name: "link_id", type: "string", required: true, description: "Link ID from servers endpoint" }], example: "/api/source/abc123" }
+      ]
+    },
+    categories: {
+      name: "Categories & Types",
+      endpoints: [
+        { method: "GET", path: "/ona", description: "Get Original Net Animation list", parameters: [], example: "/api/ona" },
+        { method: "GET", path: "/ova", description: "Get OVA list", parameters: [], example: "/api/ova" },
+        { method: "GET", path: "/movie", description: "Get anime movies", parameters: [], example: "/api/movie" },
+        { method: "GET", path: "/specials", description: "Get specials", parameters: [], example: "/api/specials" },
+        { method: "GET", path: "/events", description: "Get events", parameters: [], example: "/api/events" }
+      ]
+    }
+  },
+  workflow: {
+    steps: [
+      "Search or browse: Use /api/search or /api/home",
+      "Get anime details: Use the slug with /api/anime/:slug to get ani_id",
+      "Fetch episodes: Use ani_id with /api/episodes/:ani_id to get episode tokens",
+      "Get servers: Use episode token with /api/servers/:ep_token to get link_id",
+      "Get stream: Use link_id with /api/source/:link_id to get m3u8 URL"
+    ]
+  },
+  commonResponses: {
+    success: { description: "Successful response", example: { success: true, timestamp: "2024-01-01T00:00:00.000Z", data: "..." } },
+    error: { description: "Error response", example: { success: false, timestamp: "2024-01-01T00:00:00.000Z", error: { message: "Error description", code: "ERROR_CODE", status: 500 } } }
+  }
+};
+
+// ==================== GENERATE DOCS HTML ====================
+const generateDocsHTML = () => {
+  const endpointRows = (endpoints, baseRoute) => endpoints.map(ep => `
+    <tr>
+      <td><span class="method method-${ep.method.toLowerCase()}">${ep.method}</span></td>
+      <td><code>${baseRoute}${ep.path}</code></td>
+      <td>${ep.description}</td>
+      <td>${ep.parameters.length > 0 ? `<ul class="params-list">${ep.parameters.map(p => `<li><code>${p.name}</code> (${p.type})${p.required ? ' <span class="required">required</span>' : ''}${p.default !== undefined ? ` <span class="default">default: ${p.default}</span>` : ''}<br><span class="param-desc">${p.description}</span></li>`).join('')}</ul>` : '<span class="none">None</span>'}</td>
+      <td><code class="example">${ep.example}</code></td>
+    </tr>
+  `).join('');
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>${API_DOCS.title} | Documentation</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      line-height: 1.5;
+      color: #e0e0e0;
+      background: #0a0a0a;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 16px;
+    }
+
+    /* Header Styles */
+    header {
+      background: linear-gradient(135deg, #0f0f23 0%, #1a1a2e 50%, #16213e 100%);
+      border: 1px solid rgba(0, 217, 255, 0.2);
+      border-radius: 20px;
+      padding: 32px 20px;
+      text-align: center;
+      margin-bottom: 24px;
+    }
+
+    header h1 {
+      font-size: 1.8rem;
+      margin-bottom: 12px;
+      background: linear-gradient(90deg, #00d9ff, #00ff88);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    header p {
+      opacity: 0.85;
+      font-size: 0.95rem;
+      max-width: 500px;
+      margin: 0 auto;
+    }
+
+    .version {
+      background: rgba(0, 217, 255, 0.15);
+      border: 1px solid rgba(0, 217, 255, 0.3);
+      padding: 6px 16px;
+      border-radius: 30px;
+      display: inline-block;
+      margin-top: 16px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #00d9ff;
+    }
+
+    .deploy-badges {
+      margin-top: 20px;
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .deploy-badge {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      padding: 8px 16px;
+      border-radius: 10px;
+      color: #e0e0e0;
+      text-decoration: none;
+      font-size: 0.85rem;
+      font-weight: 500;
+      transition: all 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .deploy-badge:hover {
+      border-color: #00d9ff;
+      background: #222;
+      transform: translateY(-1px);
+    }
+
+    /* Service Cards */
+    .service {
+      background: #111;
+      border: 1px solid #222;
+      border-radius: 16px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+
+    .service h2 {
+      color: #00d9ff;
+      margin-bottom: 12px;
+      font-size: 1.3rem;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .service-badge {
+      background: linear-gradient(90deg, #00d9ff, #00ff88);
+      color: #0a0a0a;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 0.7rem;
+      font-weight: 700;
+    }
+
+    /* Table Styles - Responsive */
+    .table-wrapper {
+      overflow-x: auto;
+      margin: 16px 0;
+      border-radius: 12px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+      min-width: 600px;
+    }
+
+    th, td {
+      padding: 12px 10px;
+      text-align: left;
+      border-bottom: 1px solid #222;
+      vertical-align: top;
+    }
+
+    th {
+      background: #1a1a1a;
+      font-weight: 600;
+      color: #00d9ff;
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    tr:hover {
+      background: #161616;
+    }
+
+    /* Method Badges */
+    .method {
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 0.7rem;
+      font-weight: bold;
+      text-transform: uppercase;
+      display: inline-block;
+    }
+
+    .method-get {
+      background: rgba(0, 255, 136, 0.15);
+      color: #00ff88;
+      border: 1px solid rgba(0, 255, 136, 0.3);
+    }
+
+    /* Code Styles */
+    code {
+      background: #1a1a1a;
+      padding: 2px 6px;
+      border-radius: 5px;
+      font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+      font-size: 0.75rem;
+      color: #00d9ff;
+      word-break: break-all;
+    }
+
+    .example {
+      background: #1a1a1a;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 0.7rem;
+      display: inline-block;
+      word-break: break-all;
+      color: #00ff88;
+      border: 1px solid #222;
+      font-family: monospace;
+    }
+
+    /* Parameters List */
+    .params-list {
+      list-style: none;
+      font-size: 0.7rem;
+    }
+
+    .params-list li {
+      margin-bottom: 8px;
+      padding: 6px;
+      background: #0a0a0a;
+      border-radius: 6px;
+      border-left: 2px solid #00d9ff;
+    }
+
+    .params-list code {
+      font-size: 0.7rem;
+      background: #222;
+    }
+
+    .required {
+      color: #ff4757;
+      font-weight: bold;
+      font-size: 0.65rem;
+    }
+
+    .default {
+      color: #ffa502;
+      font-size: 0.65rem;
+    }
+
+    .param-desc {
+      display: block;
+      color: #888;
+      margin-top: 4px;
+      font-size: 0.65rem;
+    }
+
+    .none {
+      color: #666;
+      font-size: 0.7rem;
+    }
+
+    /* Response Format Section */
+    .response-format {
+      background: #111;
+      border: 1px solid #222;
+      padding: 20px;
+      border-radius: 16px;
+      margin-top: 20px;
+    }
+
+    .response-format h3 {
+      color: #00d9ff;
+      margin-bottom: 16px;
+      font-size: 1.2rem;
+    }
+
+    .response-format h4 {
+      color: #00ff88;
+      margin: 16px 0 8px 0;
+      font-size: 0.9rem;
+    }
+
+    .response-format pre {
+      background: #0a0a0a;
+      color: #00ff88;
+      padding: 16px;
+      border-radius: 10px;
+      overflow-x: auto;
+      border: 1px solid #222;
+      font-family: 'Monaco', 'Menlo', monospace;
+      font-size: 0.7rem;
+      line-height: 1.5;
+    }
+
+    /* Workflow Section */
+    .workflow {
+      background: #111;
+      border: 1px solid #222;
+      padding: 20px;
+      border-radius: 16px;
+      margin-top: 20px;
+    }
+
+    .workflow h3 {
+      color: #00d9ff;
+      margin-bottom: 16px;
+      font-size: 1.2rem;
+    }
+
+    .workflow ol {
+      margin-left: 20px;
+      line-height: 1.8;
+    }
+
+    .workflow li {
+      margin-bottom: 8px;
+      font-size: 0.85rem;
+    }
+
+    .workflow code {
+      font-size: 0.75rem;
+    }
+
+    /* Footer */
+    footer {
+      text-align: center;
+      padding: 24px;
+      color: #666;
+      font-size: 0.75rem;
+      border-top: 1px solid #222;
+      margin-top: 24px;
+    }
+
+    footer a {
+      color: #00d9ff;
+      text-decoration: none;
+    }
+
+    footer a:hover {
+      text-decoration: underline;
+    }
+
+    /* Mobile First Adjustments */
+    @media (max-width: 768px) {
+      .container {
+        padding: 12px;
+      }
+
+      header {
+        padding: 24px 16px;
+      }
+
+      header h1 {
+        font-size: 1.5rem;
+      }
+
+      .service {
+        padding: 16px;
+      }
+
+      .service h2 {
+        font-size: 1.1rem;
+      }
+
+      th, td {
+        padding: 10px 8px;
+      }
+
+      .params-list li {
+        font-size: 0.7rem;
+      }
+
+      .response-format pre {
+        font-size: 0.65rem;
+        padding: 12px;
+      }
+
+      .deploy-badge {
+        padding: 6px 12px;
+        font-size: 0.75rem;
+      }
+    }
+
+    /* Small devices */
+    @media (max-width: 480px) {
+      .service-badge {
+        font-size: 0.6rem;
+        padding: 3px 10px;
+      }
+
+      th {
+        font-size: 0.65rem;
+      }
+
+      td {
+        font-size: 0.7rem;
+      }
+
+      .example {
+        font-size: 0.6rem;
+        padding: 4px 8px;
+      }
+    }
+
+    /* Smooth scrolling */
+    html {
+      scroll-behavior: smooth;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>${API_DOCS.title}</h1>
+      <p>${API_DOCS.description}</p>
+      <span class="version">Version ${API_DOCS.version}</span>
+      <div class="deploy-badges">
+        <a href="https://vercel.com/new/clone?repository-url=https://github.com/koudex/anikaix-api.git" class="deploy-badge" target="_blank">
+          <svg width="16" height="16" viewBox="0 0 76 65" fill="currentColor"><path d="M37.5274 0L75.0548 65H0L37.5274 0Z"/></svg>
+          Deploy to Vercel
+        </a>
+        <a href="https://app.netlify.com/start/deploy?repository=https://github.com/koudex/anikaix-api.git" class="deploy-badge" target="_blank">
+          <svg width="16" height="16" viewBox="0 0 256 256" fill="currentColor"><path d="M128 0C57.3 0 0 57.3 0 128s57.3 128 128 128 128-57.3 128-128S198.7 0 128 0z"/></svg>
+          Deploy to Netlify
+        </a>
+      </div>
+    </header>
+
+    ${Object.entries(API_DOCS.services).map(([key, service]) => `
+      <section class="service">
+        <h2>${service.name}<span class="service-badge">/api${service.endpoints[0]?.path?.startsWith('/') ? '' : '/'}${service.endpoints[0]?.path?.split('/')[1] || ''}</span></h2>
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Endpoint</th>
+                <th>Description</th>
+                <th>Parameters</th>
+                <th>Example</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${endpointRows(service.endpoints, '/api')}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    `).join('')}
+
+    <section class="workflow">
+      <h3>Streaming Workflow</h3>
+      <ol>
+        ${API_DOCS.workflow.steps.map(step => `<li>${step.replace(/(\/api\/[^\s]+)/g, '<code>$1</code>')}</li>`).join('')}
+      </ol>
+    </section>
+
+    <section class="response-format">
+      <h3>Response Format</h3>
+      <h4>Success Response</h4>
+      <pre>${JSON.stringify(API_DOCS.commonResponses.success.example, null, 2)}</pre>
+      <h4>Error Response</h4>
+      <pre>${JSON.stringify(API_DOCS.commonResponses.error.example, null, 2)}</pre>
+    </section>
+
+    <footer>
+      <p><a href="/docs/json">JSON Documentation</a> | <a href="/">API Status</a></p>
+      <p style="margin-top: 8px;">&copy; 2026 anikaix-api</p>
+    </footer>
+  </div>
+</body>
+</html>`;
+};
+
+// ==================== ORIGINAL ENDPOINTS ====================
+app.get('/', (req, res) => {
+  res.json(createResponse(true, {
+    name: "Anime Kai REST API",
+    version: API_DOCS.version,
+    description: API_DOCS.description,
+    documentation: "/docs",
+    endpoints: {
+      home: "/api/home",
+      search: "/api/search?keyword=...",
+      anime: "/api/anime/:slug",
+      episodes: "/api/episodes/:ani_id",
+      servers: "/api/servers/:ep_token",
+      source: "/api/source/:link_id",
+      trending: "/api/trending",
+      popular: "/api/popular",
+      schedule: "/api/schedule"
+    }
+  }));
 });
 
+app.get('/docs', (req, res) => {
+  res.setHeader('Content-Type', 'text/html');
+  res.send(generateDocsHTML());
+});
+
+app.get('/docs/json', (req, res) => {
+  res.json(createResponse(true, API_DOCS));
+});
+
+app.get('/health', (req, res) => {
+  res.json(createResponse(true, { status: "healthy", uptime: process.uptime(), serverless: IS_SERVERLESS }));
+});
+
+// ==================== API ENDPOINTS ====================
 app.get('/api/most-searched', async (req, res) => {
   const result = await animekai.mostSearched();
   sendResult(res, { results: result, count: Array.isArray(result) ? result.length : 0 });
@@ -91,7 +632,6 @@ app.get('/api/source/:link_id', async (req, res) => {
   sendResult(res, result);
 });
 
-// ---------------------- ADDITIONAL ENDPOINTS ----------------------
 app.get('/api/trending', async (req, res) => {
   const result = await animekai.getTrending();
   sendResult(res, { trending: result });
@@ -180,548 +720,47 @@ app.get('/api/episode-srcs', async (req, res) => {
   sendResult(res, { link_id: id, server, category, ...source });
 });
 
-// API Playground HTML
-app.get('/docs', (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Anime Kai API Playground</title>
-      <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { 
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif; 
-          background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-          min-height: 100vh;
-          color: #e0e0e0;
-        }
-        .container { max-width: 1400px; margin: 0 auto; padding: 2rem; }
-        h1 { 
-          color: #ff6b6b; 
-          font-size: 2.5rem; 
-          margin-bottom: 0.5rem;
-          display: flex;
-          align-items: center;
-          gap: 10px;
-        }
-        h1 small { font-size: 1rem; color: #888; margin-left: 10px; }
-        h2 { color: #ff9f43; margin: 1.5rem 0 1rem 0; font-size: 1.5rem; border-bottom: 2px solid #ff9f43; padding-bottom: 0.5rem; }
-        h3 { color: #54a0ff; margin: 1rem 0; font-size: 1.2rem; }
-        .subtitle { color: #aaa; margin-bottom: 2rem; }
-        
-        .card { 
-          background: rgba(255,255,255,0.05); 
-          border-radius: 12px; 
-          padding: 1.5rem; 
-          margin-bottom: 1.5rem; 
-          border: 1px solid rgba(255,255,255,0.1);
-          backdrop-filter: blur(10px);
-        }
-        
-        .endpoint-row {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 10px;
-          align-items: center;
-          background: rgba(0,0,0,0.3);
-          padding: 15px;
-          border-radius: 8px;
-          margin-bottom: 15px;
-        }
-        
-        .method-badge {
-          display: inline-block;
-          padding: 4px 10px;
-          border-radius: 20px;
-          font-size: 0.8rem;
-          font-weight: bold;
-          min-width: 60px;
-          text-align: center;
-        }
-        .method-get { background: #10ac84; color: white; }
-        
-        input, select, button {
-          padding: 10px 15px;
-          border-radius: 8px;
-          border: 1px solid rgba(255,255,255,0.2);
-          background: rgba(0,0,0,0.3);
-          color: white;
-          font-size: 0.95rem;
-          transition: all 0.3s;
-        }
-        input:focus, select:focus { outline: none; border-color: #ff6b6b; background: rgba(0,0,0,0.5); }
-        input { flex: 1; min-width: 250px; }
-        input::placeholder { color: #888; }
-        
-        button {
-          background: linear-gradient(135deg, #ff6b6b 0%, #ee5a24 100%);
-          color: white;
-          border: none;
-          cursor: pointer;
-          font-weight: 600;
-          padding: 10px 20px;
-        }
-        button:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(255,107,107,0.3); }
-        button.secondary { background: linear-gradient(135deg, #54a0ff 0%, #5f27cd 100%); }
-        button.small { padding: 6px 12px; font-size: 0.85rem; }
-        
-        .quick-links {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 8px;
-          margin: 15px 0;
-        }
-        
-        pre {
-          background: #0a0a0a;
-          padding: 1.5rem;
-          border-radius: 8px;
-          overflow-x: auto;
-          font-size: 0.9rem;
-          line-height: 1.5;
-          border: 1px solid #333;
-          max-height: 500px;
-          overflow-y: auto;
-        }
-        code { font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace; }
-        
-        .response-section { margin-top: 20px; }
-        .response-header { 
-          display: flex; 
-          justify-content: space-between; 
-          align-items: center; 
-          margin-bottom: 10px;
-        }
-        
-        .example-box {
-          background: rgba(84, 160, 255, 0.1);
-          border-left: 4px solid #54a0ff;
-          padding: 15px;
-          border-radius: 0 8px 8px 0;
-          margin: 15px 0;
-        }
-        .example-box h4 { color: #54a0ff; margin-bottom: 10px; }
-        
-        .grid-2 {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-          gap: 20px;
-        }
-        
-        .endpoint-group {
-          background: rgba(0,0,0,0.2);
-          border-radius: 8px;
-          padding: 15px;
-        }
-        
-        .loading { color: #ff9f43; }
-        .error { color: #ff6b6b; }
-        .success { color: #10ac84; }
-        
-        .tab-container { margin: 20px 0; }
-        .tabs { display: flex; gap: 5px; border-bottom: 2px solid #333; padding-bottom: 10px; }
-        .tab { 
-          padding: 8px 16px; 
-          background: transparent; 
-          border: none; 
-          color: #aaa; 
-          cursor: pointer;
-          border-radius: 8px 8px 0 0;
-        }
-        .tab.active { background: #ff6b6b; color: white; }
-        .tab-content { display: none; padding: 20px 0; }
-        .tab-content.active { display: block; }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <h1>
-          🎬 Anime Kai API 
-          <small>v2.0.0</small>
-        </h1>
-        <p class="subtitle">Comprehensive REST API for anime streaming data - Scrapes anikai.to</p>
-        
-        <div class="card">
-          <h3>🚀 API Request Tester</h3>
-          <div class="endpoint-row">
-            <span class="method-badge method-get">GET</span>
-            <input type="text" id="endpointInput" placeholder="/api/home" value="/api/home" style="flex: 2;">
-            <button onclick="callApi()">▶ Send Request</button>
-            <button class="secondary" onclick="clearResponse()">🗑 Clear</button>
-          </div>
-          
-          <div class="quick-links">
-            <span style="color: #aaa; margin-right: 10px;">Quick:</span>
-            <button class="small" onclick="loadEndpoint('/api/')">API Info</button>
-            <button class="small" onclick="loadEndpoint('/api/home')">Home</button>
-            <button class="small" onclick="loadEndpoint('/api/trending')">Trending</button>
-            <button class="small" onclick="loadEndpoint('/api/popular')">Popular</button>
-            <button class="small" onclick="loadEndpoint('/api/most-searched')">Most Searched</button>
-            <button class="small" onclick="loadEndpoint('/api/schedule')">Schedule</button>
-            <button class="small" onclick="loadEndpoint('/api/genre')">Genres</button>
-            <button class="small" onclick="loadEndpoint('/api/random')">Random</button>
-          </div>
-          
-          <div class="response-section">
-            <div class="response-header">
-              <h3>📋 Response</h3>
-              <span id="responseStatus"></span>
-            </div>
-            <pre id="responseArea">{
-  "success": true,
-  "api": "Anime Kai REST API",
-  "version": "2.0.0",
-  "author": "AnimeKai Scraper"
-}
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json(createResponse(false, null, {
+    message: \`Route \${req.method} \${req.path} not found\`,
+    code: 'ROUTE_NOT_FOUND',
+    status: 404
+  }));
+});
 
-// Click any endpoint button to test the API
-// Use the search form below to test parameterized endpoints</pre>
-          </div>
-        </div>
-        
-        <div class="tab-container">
-          <div class="tabs">
-            <button class="tab active" onclick="switchTab('examples')">📚 Examples</button>
-            <button class="tab" onclick="switchTab('endpoints')">🔗 All Endpoints</button>
-            <button class="tab" onclick="switchTab('workflow')">🔄 Workflow Guide</button>
-          </div>
-          
-          <div id="tab-examples" class="tab-content active">
-            <div class="grid-2">
-              <div class="endpoint-group">
-                <h3>🔍 Search Anime</h3>
-                <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-                  <input type="text" id="searchKeyword" placeholder="e.g., naruto, one piece" value="naruto">
-                  <button onclick="searchAnime()">Search</button>
-                </div>
-                <div class="example-box">
-                  <h4>Expected Response:</h4>
-                  <pre style="font-size: 0.8rem; padding: 10px;">{
-  "success": true,
-  "keyword": "naruto",
-  "count": 10,
-  "results": [{
-    "title": "Naruto",
-    "japanese_title": "ナルト",
-    "slug": "naruto",
-    "url": "https://anikai.to/watch/naruto",
-    "poster": "https://...",
-    "sub_episodes": "220",
-    "dub_episodes": "220",
-    "total_episodes": "220",
-    "year": "2002",
-    "type": "TV",
-    "rating": "7.9"
-  }]
-}</pre>
-                </div>
-              </div>
-              
-              <div class="endpoint-group">
-                <h3>📺 Get Anime Details</h3>
-                <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-                  <input type="text" id="animeSlug" placeholder="e.g., naruto" value="naruto">
-                  <button onclick="getAnimeInfo()">Get Info</button>
-                </div>
-                <div class="example-box">
-                  <h4>Expected Response:</h4>
-                  <pre style="font-size: 0.8rem; padding: 10px;">{
-  "success": true,
-  "ani_id": "12345",
-  "title": "Naruto",
-  "japanese_title": "ナルト",
-  "description": "Naruto Uzumaki...",
-  "poster": "https://...",
-  "banner": "https://...",
-  "sub_episodes": "220",
-  "dub_episodes": "220",
-  "type": "TV",
-  "rating": "7.9",
-  "mal_score": "8.0",
-  "detail": {
-    "status": "Completed",
-    "studio": "Pierrot",
-    "genres": ["Action", "Adventure"]
-  },
-  "seasons": [...]
-}</pre>
-                </div>
-              </div>
-              
-              <div class="endpoint-group">
-                <h3>📝 Get Episodes</h3>
-                <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-                  <input type="text" id="aniIdInput" placeholder="Anime ID from /api/anime/:slug">
-                  <button onclick="getEpisodes()">Get Episodes</button>
-                </div>
-                <div class="example-box">
-                  <h4>Expected Response:</h4>
-                  <pre style="font-size: 0.8rem; padding: 10px;">{
-  "success": true,
-  "ani_id": "12345",
-  "count": 220,
-  "episodes": [{
-    "number": "1",
-    "slug": "naruto-episode-1",
-    "title": "Enter: Naruto Uzumaki!",
-    "japanese_title": "参上!うずまきナルト",
-    "token": "encrypted_token_here",
-    "has_sub": true,
-    "has_dub": true
-  }]
-}</pre>
-                </div>
-              </div>
-              
-              <div class="endpoint-group">
-                <h3>🖥 Get Servers</h3>
-                <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-                  <input type="text" id="epTokenInput" placeholder="Episode token from episodes">
-                  <button onclick="getServers()">Get Servers</button>
-                </div>
-                <div class="example-box">
-                  <h4>Expected Response:</h4>
-                  <pre style="font-size: 0.8rem; padding: 10px;">{
-  "success": true,
-  "watching": "You are watching Naruto Episode 1",
-  "servers": {
-    "sub": [{
-      "name": "Server 1",
-      "server_id": "1",
-      "episode_id": "123",
-      "link_id": "abc123"
-    }],
-    "dub": [...]
-  }
-}</pre>
-                </div>
-              </div>
-              
-              <div class="endpoint-group">
-                <h3>🎬 Get Stream Source</h3>
-                <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-                  <input type="text" id="linkIdInput" placeholder="Link ID from servers">
-                  <button onclick="getSource()">Get Source</button>
-                </div>
-                <div class="example-box">
-                  <h4>Expected Response:</h4>
-                  <pre style="font-size: 0.8rem; padding: 10px;">{
-  "success": true,
-  "embed_url": "https://...",
-  "skip": {
-    "intro": [0, 90],
-    "outro": [1320, 1410]
-  },
-  "sources": [{
-    "file": "https://.../playlist.m3u8",
-    "type": "hls",
-    "label": "1080p"
-  }],
-  "tracks": [...],
-  "download": "https://..."
-}</pre>
-                </div>
-              </div>
-              
-              <div class="endpoint-group">
-                <h3>📅 Weekly Schedule</h3>
-                <button onclick="loadEndpoint('/api/schedule')" style="margin-bottom: 15px;">Get Schedule</button>
-                <div class="example-box">
-                  <h4>Expected Response:</h4>
-                  <pre style="font-size: 0.8rem; padding: 10px;">{
-  "success": true,
-  "schedule": [{
-    "day": "Monday",
-    "animeList": [{
-      "title": "Anime Name",
-      "time": "12:00",
-      "episode": "Episode 5",
-      "url": "https://..."
-    }]
-  }]
-}</pre>
-                </div>
-              </div>
-            </div>
-          </div>
-          
-          <div id="tab-endpoints" class="tab-content">
-            <h2>All Available Endpoints</h2>
-            <div style="display: grid; gap: 10px;">
-              ${[
-                ['GET /api/', 'API information and endpoints list'],
-                ['GET /api/home', 'Banner, latest updates, and trending anime'],
-                ['GET /api/most-searched', 'Most searched anime keywords'],
-                ['GET /api/search?keyword=:query', 'Search anime by keyword'],
-                ['GET /api/anime/:slug', 'Detailed anime information'],
-                ['GET /api/episodes/:ani_id', 'Episode list with tokens'],
-                ['GET /api/servers/:ep_token', 'Available streaming servers'],
-                ['GET /api/source/:link_id', 'Direct stream URL and sources'],
-                ['GET /api/trending', 'Currently trending anime'],
-                ['GET /api/popular', 'Most popular this week'],
-                ['GET /api/schedule', 'Weekly airing schedule'],
-                ['GET /api/random', 'Random anime details'],
-                ['GET /api/genre', 'All available genres'],
-                ['GET /api/az-list', 'Anime organized A-Z'],
-                ['GET /api/subbed-anime', 'Subbed anime list'],
-                ['GET /api/dubbed-anime', 'Dubbed anime list'],
-                ['GET /api/ona', 'Original Net Animation list'],
-                ['GET /api/ova', 'OVA list'],
-                ['GET /api/movie', 'Anime movies'],
-                ['GET /api/specials', 'Special episodes'],
-                ['GET /api/events', 'Anime events'],
-                ['GET /api/recently-added', 'Recently added anime'],
-                ['GET /api/filter?type=&genre=&year=', 'Filter anime by criteria'],
-                ['GET /api/episode-srcs?id=', 'Alternative source endpoint']
-              ].map(([endpoint, desc]) => `
-                <div style="background: rgba(0,0,0,0.2); padding: 12px; border-radius: 8px; display: flex; align-items: center; gap: 15px;">
-                  <code style="color: #10ac84; min-width: 250px;">${endpoint}</code>
-                  <span style="color: #aaa;">${desc}</span>
-                  <button class="small" style="margin-left: auto;" onclick="loadEndpoint('${endpoint.split(' ')[1]}')">Test</button>
-                </div>
-              `).join('')}
-            </div>
-          </div>
-          
-          <div id="tab-workflow" class="tab-content">
-            <h2>🔄 Complete Streaming Workflow</h2>
-            <div style="background: rgba(0,0,0,0.2); padding: 20px; border-radius: 8px;">
-              <ol style="line-height: 2; margin-left: 20px;">
-                <li><strong>Search or Browse:</strong> Use <code>/api/search?keyword=anime</code> or <code>/api/home</code></li>
-                <li><strong>Get Anime Details:</strong> Use the slug from search results with <code>/api/anime/:slug</code></li>
-                <li><strong>Fetch Episodes:</strong> Use the <code>ani_id</code> from details with <code>/api/episodes/:ani_id</code></li>
-                <li><strong>Get Streaming Servers:</strong> Use an episode's <code>token</code> with <code>/api/servers/:ep_token</code></li>
-                <li><strong>Get Video Source:</strong> Use a server's <code>link_id</code> with <code>/api/source/:link_id</code></li>
-                <li><strong>Play Video:</strong> Use the <code>sources[].file</code> URL in your video player</li>
-              </ol>
-              
-              <div class="example-box" style="margin-top: 20px;">
-                <h4>📝 Example Code (JavaScript):</h4>
-                <pre style="font-size: 0.85rem;">// Complete workflow example
-async function streamAnime(animeName, episodeNum) {
-  // 1. Search for anime
-  const searchRes = await fetch('/api/search?keyword=' + animeName);
-  const searchData = await searchRes.json();
-  const anime = searchData.results[0];
-  
-  // 2. Get anime details
-  const infoRes = await fetch('/api/anime/' + anime.slug);
-  const infoData = await infoRes.json();
-  
-  // 3. Get episodes
-  const epsRes = await fetch('/api/episodes/' + infoData.ani_id);
-  const epsData = await epsRes.json();
-  const episode = epsData.episodes.find(e => e.number == episodeNum);
-  
-  // 4. Get servers
-  const servRes = await fetch('/api/servers/' + episode.token);
-  const servData = await servRes.json();
-  const server = servData.servers.sub[0];
-  
-  // 5. Get video source
-  const srcRes = await fetch('/api/source/' + server.link_id);
-  const srcData = await srcRes.json();
-  
-  // 6. Play video
-  return srcData.sources[0].file; // m3u8 URL
-}</pre>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-      
-      <script>
-        let currentEndpoint = '/api/home';
-        
-        async function callApi() {
-          const endpoint = document.getElementById('endpointInput').value;
-          currentEndpoint = endpoint;
-          const statusEl = document.getElementById('responseStatus');
-          const responseEl = document.getElementById('responseArea');
-          
-          statusEl.innerHTML = '<span class="loading">⏳ Loading...</span>';
-          responseEl.innerHTML = 'Loading...';
-          
-          try {
-            const startTime = Date.now();
-            const res = await fetch(endpoint);
-            const data = await res.json();
-            const duration = Date.now() - startTime;
-            
-            statusEl.innerHTML = \`<span class="success">✓ \${res.status} OK</span> <span style="color: #888;">(\${duration}ms)</span>\`;
-            responseEl.innerHTML = JSON.stringify(data, null, 2);
-          } catch (err) {
-            statusEl.innerHTML = '<span class="error">✗ Error</span>';
-            responseEl.innerHTML = 'Error: ' + err.message;
-          }
-        }
-        
-        function loadEndpoint(ep) {
-          document.getElementById('endpointInput').value = ep;
-          callApi();
-        }
-        
-        function clearResponse() {
-          document.getElementById('responseArea').innerHTML = '// Response cleared';
-          document.getElementById('responseStatus').innerHTML = '';
-        }
-        
-        async function searchAnime() {
-          const kw = document.getElementById('searchKeyword').value;
-          if (!kw) return alert('Enter a keyword');
-          loadEndpoint('/api/search?keyword=' + encodeURIComponent(kw));
-        }
-        
-        async function getAnimeInfo() {
-          const slug = document.getElementById('animeSlug').value;
-          if (!slug) return alert('Enter an anime slug');
-          loadEndpoint('/api/anime/' + encodeURIComponent(slug));
-        }
-        
-        async function getEpisodes() {
-          const aniId = document.getElementById('aniIdInput').value;
-          if (!aniId) return alert('Enter an anime ID (get from /api/anime/:slug)');
-          loadEndpoint('/api/episodes/' + encodeURIComponent(aniId));
-        }
-        
-        async function getServers() {
-          const token = document.getElementById('epTokenInput').value;
-          if (!token) return alert('Enter an episode token');
-          loadEndpoint('/api/servers/' + encodeURIComponent(token));
-        }
-        
-        async function getSource() {
-          const linkId = document.getElementById('linkIdInput').value;
-          if (!linkId) return alert('Enter a link ID');
-          loadEndpoint('/api/source/' + encodeURIComponent(linkId));
-        }
-        
-        function switchTab(tabName) {
-          document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-          document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-          document.querySelector(\`[onclick="switchTab('\${tabName}')"]\`).classList.add('active');
-          document.getElementById(\`tab-\${tabName}\`).classList.add('active');
-        }
-        
-        // Load API info on page load
-        window.addEventListener('load', () => {
-          callApi();
-        });
-      </script>
-    </body>
-    </html>
-  `);
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error('Server Error:', err);
+  res.status(500).json(createResponse(false, null, {
+    message: err.message || 'Internal Server Error',
+    code: 'INTERNAL_ERROR',
+    status: 500
+  }));
 });
 
 // Run the server locally if not in a serverless production environment
-if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL && !process.env.NETLIFY) {
+if (!IS_SERVERLESS && process.env.NODE_ENV !== 'production') {
   app.listen(PORT, () => {
-    console.log(`🎬 Anime Kai API running on port ${PORT}`);
+    console.log(`
+╔════════════════════════════════════════════════════════════╗
+║                  ANIME KAI REST API                        ║
+╠════════════════════════════════════════════════════════════╣
+║  Server running at: http://localhost:${PORT}                  ║
+║  Documentation:     http://localhost:${PORT}/docs              ║
+║  Health Check:      http://localhost:${PORT}/health            ║
+╠════════════════════════════════════════════════════════════╣
+║  API Endpoints:                                            ║
+║    - /api/home       (Latest updates & trending)           ║
+║    - /api/search     (Search anime)                        ║
+║    - /api/anime/:slug (Anime details)                      ║
+║    - /api/episodes/:ani_id (Episode list)                  ║
+║    - /api/servers/:ep_token (Streaming servers)            ║
+║    - /api/source/:link_id (Direct m3u8 source)             ║
+╚════════════════════════════════════════════════════════════╝
+    `);
   });
 }
 
-// Export the app for serverless deployment (Vercel/Netlify)
+// Export for serverless deployment
 module.exports = app;
